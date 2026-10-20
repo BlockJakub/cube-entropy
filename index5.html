@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>3D Barevná Entropie Kostky s Výrazným Prachem</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background: radial-gradient(circle at center, #0f172a 0%, #020617 100%);
+      height: 100vh;
+      overflow: hidden;
+      font-family: system-ui, -apple-system, sans-serif;
+      touch-action: none;
+    }
+
+    #canvas-container {
+      width: 100%;
+      height: 100%;
+    }
+
+    #info {
+      position: absolute;
+      top: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: #f8fafc;
+      font-size: 1rem;
+      letter-spacing: 0.5px;
+      background: rgba(15, 23, 42, 0.85);
+      padding: 10px 20px;
+      border-radius: 20px;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+      pointer-events: none;
+      text-align: center;
+      z-index: 10;
+    }
+  </style>
+
+  <!-- CDN Knihovny -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/cannon.js/0.6.2/cannon.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/animejs/3.2.1/anime.min.js"></script>
+</head>
+<body>
+
+  <div id="info">Ťukni na kostku pro pád na zem</div>
+  <div id="canvas-container"></div>
+
+  <script>
+    // --- 1. SCÉNA A KAMERA ---
+    const container = document.getElementById('canvas-container');
+    const scene = new THREE.Scene();
+    
+    const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+    let cameraAngle = 0;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.shadowMap.enabled = true;
+    container.appendChild(renderer.domElement);
+
+    // Světla
+    scene.add(new THREE.AmbientLight(0xffffff, 0.8));
+    const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
+    dirLight.position.set(15, 25, 15);
+    dirLight.castShadow = true;
+    scene.add(dirLight);
+
+    // Podlaha
+    const floorGeo = new THREE.PlaneGeometry(60, 60);
+    const floorMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.8, metalness: 0.2 });
+    const floor = new THREE.Mesh(floorGeo, floorMat);
+    floor.rotation.x = -Math.PI / 2;
+    floor.receiveShadow = true;
+    scene.add(floor);
+
+    // --- 2. VÝRAZNÝ SVÍTIVÝ PRACH PŘI NÁRAZU ---
+    const PARTICLE_COUNT = 400;
+    const dustGeometry = new THREE.BufferGeometry();
+    const dustPositions = new Float32Array(PARTICLE_COUNT * 3);
+    const dustVelocities = [];
+
+    for (let i = 0; i < PARTICLE_COUNT; i++) {
+      dustPositions[i * 3] = 0;
+      dustPositions[i * 3 + 1] = -20;
+      dustPositions[i * 3 + 2] = 0;
+      dustVelocities.push({ x: 0, y: 0, z: 0 });
+    }
+
+    dustGeometry.setAttribute('position', new THREE.BufferAttribute(dustPositions, 3));
+
+    // Jasně zářivé, větší bílo-zlaté částice
+    const dustMaterial = new THREE.PointsMaterial({
+      color: 0xffedd5,
+      size: 0.6,
+      transparent: true,
+      opacity: 0,
+      blending: THREE.AdditiveBlending
+    });
+
+    const dustParticles = new THREE.Points(dustGeometry, dustMaterial);
+    scene.add(dustParticles);
+
+    function createDustExplosion() {
+      const positions = dustGeometry.attributes.position.array;
+      dustMaterial.opacity = 1.0;
+
+      for (let i = 0; i < PARTICLE_COUNT; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const radius = Math.random() * 2.5;
+
+        // Vystřelení částic do šířky i výšky
+        positions[i * 3] = Math.cos(angle) * radius;
+        positions[i * 3 + 1] = 0.1;
+        positions[i * 3 + 2] = Math.sin(angle) * radius;
+
+        dustVelocities[i] = {
+          x: Math.cos(angle) * (Math.random() * 0.3 + 0.1),
+          y: Math.random() * 0.25 + 0.08,
+          z: Math.sin(angle) * (Math.random() * 0.3 + 0.1)
+        };
+      }
+      dustGeometry.attributes.position.needsUpdate = true;
+    }
+
+    function updateDust() {
+      if (dustMaterial.opacity > 0) {
+        const positions = dustGeometry.attributes.position.array;
+        for (let i = 0; i < PARTICLE_COUNT; i++) {
+          positions[i * 3] += dustVelocities[i].x;
+          positions[i * 3 + 1] += dustVelocities[i].y;
+          positions[i * 3 + 2] += dustVelocities[i].z;
+
+          // Brzdění pohybu částic vzduchem
+          dustVelocities[i].x *= 0.96;
+          dustVelocities[i].z *= 0.96;
+        }
+        dustGeometry.attributes.position.needsUpdate = true;
+        dustMaterial.opacity -= 0.007; // Pomalé mizení
+      }
+    }
+
+    // --- 3. FYZIKÁLNÍ SVĚT ---
+    const world = new CANNON.World();
+    world.gravity.set(0, -9.82, 0);
+    world.broadphase = new CANNON.NaiveBroadphase();
+    world.solver.iterations = 10;
+
+    const groundBody = new CANNON.Body({
+      mass: 0,
+      shape: new CANNON.Plane(),
+      material: new CANNON.Material({ restitution: 0.35, friction: 0.4 })
+    });
+    groundBody.quaternion.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), -Math.PI / 2);
+    world.addBody(groundBody);
+
+    // --- 4. BAREVNÉ PRŮHLEDNÉ KOSTKY (6x6x6 = 216 dílků) ---
+    const cubes = [];
+    const GRID_SIZE = 6;
+    const CUBE_DIM = 0.5;
+    const CUBE_GAP = 0.02;
+    const START_Y = 3.5;
+
+    const geometry = new THREE.BoxGeometry(CUBE_DIM, CUBE_DIM, CUBE_DIM);
+    const centerOffset = ((GRID_SIZE * (CUBE_DIM + CUBE_GAP)) - CUBE_GAP) / 2;
+
+    let totalIndex = 0;
+    const totalCubes = GRID_SIZE * GRID_SIZE * GRID_SIZE;
+
+    for (let x = 0; x < GRID_SIZE; x++) {
+      for (let y = 0; y < GRID_SIZE; y++) {
+        for (let z = 0; z < GRID_SIZE; z++) {
+          const targetX = (x * (CUBE_DIM + CUBE_GAP)) - centerOffset + (CUBE_DIM / 2);
+          const targetY = (y * (CUBE_DIM + CUBE_GAP)) + START_Y;
+          const targetZ = (z * (CUBE_DIM + CUBE_GAP)) - centerOffset + (CUBE_DIM / 2);
+
+          const hue = (totalIndex / totalCubes) * 360;
+          const cubeColor = new THREE.Color(`hsl(${hue}, 90%, 60%)`);
+
+          const material = new THREE.MeshStandardMaterial({ 
+            color: cubeColor, 
+            roughness: 0.1, 
+            metalness: 0.1,
+            transparent: true,
+            opacity: 0.7
+          });
+
+          const mesh = new THREE.Mesh(geometry, material);
+          mesh.position.set(targetX, targetY, targetZ);
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+
+          const edges = new THREE.EdgesGeometry(geometry);
+          const lineMaterial = new THREE.LineBasicMaterial({ 
+            color: cubeColor, 
+            transparent: true, 
+            opacity: 0.8 
+          });
+          const line = new THREE.LineSegments(edges, lineMaterial);
+          mesh.add(line);
+          scene.add(mesh);
+
+          const shape = new CANNON.Box(new CANNON.Vec3(CUBE_DIM / 2, CUBE_DIM / 2, CUBE_DIM / 2));
+          const body = new CANNON.Body({
+            mass: 0,
+            position: new CANNON.Vec3(targetX, targetY, targetZ),
+            material: new CANNON.Material({ restitution: 0.4, friction: 0.5 })
+          });
+          body.addShape(shape);
+          world.addBody(body);
+
+          cubes.push({
+            mesh: mesh,
+            line: line,
+            baseColor: cubeColor,
+            body: body,
+            targetPos: { x: targetX, y: targetY, z: targetZ },
+            targetRot: { x: 0, y: 0, z: 0 }
+          });
+
+          totalIndex++;
+        }
+      }
+    }
+
+    // --- 5. INTERAKCE A INDIVIDUÁLNÍ NÁHODNÁ ENTROPIE ---
+    let state = 'IDLE';
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+
+    function triggerShatter() {
+      if (state !== 'IDLE') return;
+      state = 'FALLING';
+      document.getElementById('info').innerText = "Fyzikální pád na zem...";
+
+      cubes.forEach((cube) => {
+        cube.body.mass = 1;
+        cube.body.type = CANNON.Body.DYNAMIC;
+        cube.body.updateMassProperties();
+        cube.body.wakeUp();
+
+        const randForceX = (Math.random() - 0.5) * 5.5;
+        const randForceZ = (Math.random() - 0.5) * 5.5;
+        const randForceY = Math.random() * 2;
+        
+        cube.body.applyImpulse(new CANNON.Vec3(randForceX, randForceY, randForceZ), cube.body.position);
+        cube.body.angularVelocity.set((Math.random() - 0.5) * 16, (Math.random() - 0.5) * 16, (Math.random() - 0.5) * 16);
+      });
+
+      // Zřetelný prachový mrak hned při dopadu
+      setTimeout(createDustExplosion, 280);
+      
+      // Po 2.7 s spuštění zpětné entropie
+      setTimeout(startReverseEntropy, 2700);
+    }
+
+    function startReverseEntropy() {
+      state = 'REVERSING';
+      document.getElementById('info').innerText = "Entropie: Náhodné skládání zpět (17s)...";
+
+      const goldColor = new THREE.Color(0xffd700);
+      let completedCount = 0;
+
+      cubes.forEach((cube) => {
+        cube.body.mass = 0;
+        cube.body.type = CANNON.Body.STATIC;
+        cube.body.velocity.set(0, 0, 0);
+        cube.body.angularVelocity.set(0, 0, 0);
+
+        cube.landedPos = { x: cube.mesh.position.x, y: cube.mesh.position.y, z: cube.mesh.position.z };
+        cube.landedRot = { x: cube.mesh.rotation.x, y: cube.mesh.rotation.y, z: cube.mesh.rotation.z };
+
+        const randomDelay = Math.random() * 9000;
+        const randomDuration = 5000 + Math.random() * 3000;
+
+        const animObj = { progress: 0 };
+
+        anime({
+          targets: animObj,
+          progress: 1,
+          delay: randomDelay,
+          duration: randomDuration,
+          easing: 'easeInOutCubic',
+          update: () => {
+            const p = animObj.progress;
+
+            cube.mesh.position.x = THREE.MathUtils.lerp(cube.landedPos.x, cube.targetPos.x, p);
+            cube.mesh.position.y = THREE.MathUtils.lerp(cube.landedPos.y, cube.targetPos.y, p);
+            cube.mesh.position.z = THREE.MathUtils.lerp(cube.landedPos.z, cube.targetPos.z, p);
+
+            cube.mesh.rotation.x = THREE.MathUtils.lerp(cube.landedRot.x, cube.targetRot.x, p);
+            cube.mesh.rotation.y = THREE.MathUtils.lerp(cube.landedRot.y, cube.targetRot.y, p);
+            cube.mesh.rotation.z = THREE.MathUtils.lerp(cube.landedRot.z, cube.targetRot.z, p);
+
+            cube.line.material.color.lerpColors(cube.baseColor, goldColor, p * 0.7);
+
+            cube.body.position.copy(cube.mesh.position);
+            cube.body.quaternion.copy(cube.mesh.quaternion);
+          },
+          complete: () => {
+            cube.line.material.color.setHex(0xffd700);
+            cube.line.material.opacity = 1.0;
+
+            anime({
+              duration: 1200,
+              easing: 'easeOutQuad',
+              update: (anim) => {
+                const prg = anim.progress / 100;
+                cube.line.material.color.lerpColors(goldColor, cube.baseColor, prg);
+                cube.line.material.opacity = THREE.MathUtils.lerp(1.0, 0.8, prg);
+              }
+            });
+
+            completedCount++;
+            if (completedCount === cubes.length) {
+              state = 'IDLE';
+              document.getElementById('info').innerText = "Ťukni na kostku pro opakování";
+            }
+          }
+        });
+      });
+    }
+
+    function handleInteraction(clientX, clientY) {
+      if (state !== 'IDLE') return;
+
+      mouse.x = (clientX / window.innerWidth) * 2 - 1;
+      mouse.y = -(clientY / window.innerHeight) * 2 + 1;
+
+      raycaster.setFromCamera(mouse, camera);
+      const intersects = raycaster.intersectObjects(cubes.map(c => c.mesh), true);
+
+      if (intersects.length > 0) {
+        triggerShatter();
+      }
+    }
+
+    window.addEventListener('click', (e) => handleInteraction(e.clientX, e.clientY));
+    window.addEventListener('touchstart', (e) => {
+      if (e.touches.length > 0) {
+        handleInteraction(e.touches[0].clientX, e.touches[0].clientY);
+      }
+    }, { passive: true });
+
+    // --- 6. RENDER LOOP ---
+    const timeStep = 1 / 60;
+    function animate() {
+      requestAnimationFrame(animate);
+
+      // Kroužení kamery
+      cameraAngle += 0.002;
+      const radius = 18;
+      camera.position.x = Math.cos(cameraAngle) * radius;
+      camera.position.z = Math.sin(cameraAngle) * radius;
+      camera.position.y = 11;
+      camera.lookAt(0, 2, 0);
+
+      updateDust();
+
+      if (state === 'FALLING') {
+        world.step(timeStep);
+        cubes.forEach((cube) => {
+          cube.mesh.position.copy(cube.body.position);
+          cube.mesh.quaternion.copy(cube.body.quaternion);
+        });
+      }
+
+      renderer.render(scene, camera);
+    }
+
+    animate();
+
+    // Resize
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html>
